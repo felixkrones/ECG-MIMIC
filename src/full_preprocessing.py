@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--target-path', help='desired output path',default="./")
     
     # you have to explicitly pass this argument to convert to numpy and memmapp
-    parset.add_argument('--numpy-memmap', help='convert to numpy and memmap for fast access', action='store_true')
+    parser.add_argument('--numpy-memmap', type=bool, default=True, help='Enable or disable numpy memmap (for fast access to waveforms)')
     
     # Parse the command-line arguments
     args = parser.parse_args()
