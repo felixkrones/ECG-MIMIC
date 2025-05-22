@@ -168,12 +168,14 @@ def stratify(data, classes, ratios, samples_per_group=None,random_seed=0,verbose
     stratified_data_ids = [set() for _ in range(len(ratios))] #initialize empty
 
     # For each sample in the data set
-    #print("Starting fold distribution...")
+    print("Starting fold distribution...")
     size_prev=size+1 #just for output
     
     #while size>0:
-    for _ in tqdm(list(range(len(classes)))):
+    print(f"Start outer loop for {len(classes)} classes with {size} samples")
+    for class_num in tqdm(list(range(len(classes)))):
         if(size==0):
+            print("size is 0, break")
             break
         #print("counter",counter,"size",size,"non-empty labels",int(np.sum([1 for l, label_data in per_label_data.items() if len(label_data)>0])),"classes",len(classes))
         #counter+=1
@@ -189,6 +191,7 @@ def stratify(data, classes, ratios, samples_per_group=None,random_seed=0,verbose
             # Find label of smallest |Di|
             label = min({k: v for k, v in lengths.items() if v > 0}, key=lengths.get)
         except ValueError:
+            print("ValueError!!!")
             # If the dictionary in `min` is empty we get a Value Error. 
             # This can happen if there are unlabeled samples.
             # In this case, `size` would be > 0 but only samples without label would remain.
@@ -201,6 +204,7 @@ def stratify(data, classes, ratios, samples_per_group=None,random_seed=0,verbose
         unique_counts =  unique_counts[idxs_sorted] # these are the corresponding counts
         
         # loop through all patient ids with this label
+        # print(f"Start {class_num} inner loop for label {label} with {len(unique_samples)} samples")
         for current_id, current_count in tqdm(list(zip(unique_samples,unique_counts)),leave=False):
             
             subset_sizes_for_label = per_label_subset_sizes[label] #current subset sizes for the chosen label

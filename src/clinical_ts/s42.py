@@ -76,6 +76,65 @@ else:
     def _resolve_conj(x): return x.conj()
 
 
+import torch
+
+def cauchy_conj_torch(v, z, w):
+    """
+    Batched PyTorch version of cauchy_conj (KeOps replacement).
+    
+    Works with input shapes:
+    - (N, 2), (M, 2), (N, 2)       → unbatched
+    - (B, N, 2), (B, M, 2), (B, N, 2) → batched
+
+    Returns:
+    - (B, M, 2) or (M, 2): complex result as real+imag
+    """
+
+    def to_complex(x):
+        if x.dtype.is_complex:
+            return x
+        elif x.shape[-1] == 2:
+            return torch.view_as_complex(x)
+        else:
+            raise ValueError("Expected [..., 2] for real+imag format or complex tensor.")
+
+    def to_real(x):
+        return torch.view_as_real(x) if x.dtype.is_complex else x
+
+    # Convert to complex tensors
+    v_c = to_complex(v)  # (B?, N)
+    z_c = to_complex(z)  # (B?, M)
+    w_c = to_complex(w)  # (B?, N)
+
+    # Add batch dimension if missing
+    if v_c.ndim == 1:
+        v_c = v_c[None, :]  # (1, N)
+        z_c = z_c[None, :]  # (1, M)
+        w_c = w_c[None, :]  # (1, N)
+
+    # Check dimensions
+    B, N = v_c.shape[0], v_c.shape[1]
+    M = z_c.shape[1]
+
+    # Compute scalar_term: sum over N
+    scalar_term = torch.sum(v_c * w_c, dim=1, keepdim=True)  # (B, 1)
+
+    # Expand for broadcasting
+    z_exp = z_c.unsqueeze(2)           # (B, M, 1)
+    v_exp = v_c.unsqueeze(1)           # (B, 1, N)
+    w_exp = w_c.unsqueeze(1)           # (B, 1, N)
+    scalar_term = scalar_term.unsqueeze(1)  # (B, 1, 1)
+
+    # Formula
+    numerator = z_exp * v_exp - scalar_term       # (B, M, N)
+    denominator = (z_exp - w_exp) * (z_exp - torch.conj(w_exp))  # (B, M, N)
+
+    result = 2 * torch.sum(numerator / denominator, dim=2)  # (B, M)
+
+    # Return as real+imag
+    return to_real(result)  # (B, M, 2)
+
+
 def cauchy_conj(v, z, w):
     """ Pykeops version """
     expr_num = 'z * ComplexReal(v) - Real2Complex(Sum(v * w))'
@@ -706,7 +765,8 @@ class SSKernelNPLR(nn.Module):
         if has_cauchy_extension and z.dtype == torch.cfloat:
             r = cauchy_mult(v, z, w, symmetric=True)
         else:
-            r = cauchy_conj(v, z, w)
+            #r = cauchy_conj(v, z, w)
+            r = cauchy_conj_torch(v, z, w)
         r = r * dt[None, None, :, None]  # (S+1+R, C+R, H, L)
 
         # Low-rank Woodbury correction

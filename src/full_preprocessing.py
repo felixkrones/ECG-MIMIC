@@ -1,15 +1,16 @@
 #!/usr/bin/env python
+import os
 import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from tqdm.auto import tqdm
-from extract_headers import extract_and_open_files_in_zip
+from extract_headers import extract_and_open_files_in_zip, extract_and_open_files
 
 #requires icd-mappings
 from icdmappings import Mapper
 from ecg_utils import prepare_mimicecg
-from timeseries_utils import reformat_as_memmap
+from clinical_ts.timeseries_utils import reformat_as_memmap
 from utils.stratify import stratified_subsets
 from mimic_ecg_preprocessing import prepare_mimic_ecg
 
@@ -21,9 +22,10 @@ def main():
     parser.add_argument('--mimic-path', help='path to mimic iv folder with subfolders hosp and ed',default="./mimic")
     parser.add_argument('--zip-path', help='path to mimic ecg zip',default="mimic-iv-ecg-diagnostic-electrocardiogram-matched-subset-1.0.zip")
     parser.add_argument('--target-path', help='desired output path',default="./")
+    parser.add_argument('--filter_file', type=str, default=None, help='path to filter file')
     
     # you have to explicitly pass this argument to convert to numpy and memmapp
-    parset.add_argument('--numpy-memmap', help='convert to numpy and memmap for fast access', action='store_true')
+    parser.add_argument('--numpy-memmap', type=bool, default=True, help='Enable or disable numpy memmap (for fast access to waveforms)')
     
     # Parse the command-line arguments
     args = parser.parse_args()
@@ -44,29 +46,35 @@ def main():
     if((target_path/"records.pkl").exists()):
         print("Skipping: using existing records.pkl")
         df = pd.read_pickle(target_path/"records.pkl")
+    elif((zip_file_path/"record_list.csv").exists()):
+        print("Creating records.pkl from folder, not zip")
+        if(not Path(f"{target_path}/records.pkl").exists()):
+            df=extract_and_open_files(zip_file_path, ".hea")
+            os.makedirs(target_path, exist_ok=True)
+            df.to_pickle(f"{target_path}/records.pkl")
     else:
         print("Creating records.pkl")
-        if(not Path("records.pkl").exists()):
+        if(not Path(f"{target_path}/records.pkl").exists()):
             df=extract_and_open_files_in_zip(zip_file_path, ".hea")
-            df.to_pickle("records.pkl")
+            os.makedirs(target_path, exist_ok=True)
+            df.to_pickle(f"{target_path}/records.pkl")
     
     #################################################################################################
     print("Step 2: Extract diagnoses for records in raw format to create records_w_diag.pkl")
+    mapper = Mapper()
+    df_hosp_icd_description = pd.read_csv(mimic_path/"hosp/d_icd_diagnoses.csv.gz")
+    df_hosp_icd_description["icd10_code"]=df_hosp_icd_description.apply(lambda row:row["icd_code"] if row["icd_version"]==10 else mapper.map(row["icd_code"], source="icd9", target="icd10"),axis=1)#mapper="icd9toicd10"
+    icd_mapping = {ic:ic10 for ic,ic10 in zip(df_hosp_icd_description["icd_code"],df_hosp_icd_description["icd10_code"])}
     if((target_path/"records_w_diag.pkl").exists()):
         print("Skipping: using existing records_w_diag.pkl")
         df_full = pd.read_pickle(target_path/"records_w_diag.pkl")
     else:
-        mapper = Mapper()
-        
-        df_hosp_icd_description = pd.read_csv(mimic_path/"hosp/d_icd_diagnoses.csv.gz")
         df_hosp_icd_diagnoses = pd.read_csv(mimic_path/"hosp/diagnoses_icd.csv.gz")
         df_hosp_admissions = pd.read_csv(mimic_path/"hosp/admissions.csv.gz")
         df_hosp_admissions["admittime"]=pd.to_datetime(df_hosp_admissions["admittime"])
         df_hosp_admissions["dischtime"]=pd.to_datetime(df_hosp_admissions["dischtime"])
         df_hosp_admissions["deathtime"]=pd.to_datetime(df_hosp_admissions["deathtime"])
         
-        df_hosp_icd_description["icd10_code"]=df_hosp_icd_description.apply(lambda row:row["icd_code"] if row["icd_version"]==10 else mapper.map(row["icd_code"], source="icd9", target="icd10"),axis=1)#mapper="icd9toicd10"
-        icd_mapping = {ic:ic10 for ic,ic10 in zip(df_hosp_icd_description["icd_code"],df_hosp_icd_description["icd10_code"])}
         df_ed_stays = pd.read_csv(mimic_path/"ed/edstays.csv.gz")
         df_ed_stays["intime"]=pd.to_datetime(df_ed_stays["intime"])
         df_ed_stays["outtime"]=pd.to_datetime(df_ed_stays["outtime"])
@@ -80,7 +88,11 @@ def main():
                 if(len(df_ecg_during_hosp)>1):
                     print("Error in get_diagnosis_hosp: multiple entries for",subject_id,ecg_time,". Considering only the first one.")
                 hadm_id=df_ecg_during_hosp.hadm_id.iloc[0]
-                return list(df_hosp_icd_diagnoses[(df_hosp_icd_diagnoses.subject_id==subject_id)&(df_hosp_icd_diagnoses.hadm_id==hadm_id)].sort_values(by=['seq_num']).icd_code), hadm_id #diags_hosp, hadm_id
+
+                df_aux_filtered = df_hosp_icd_diagnoses[(df_hosp_icd_diagnoses.subject_id==subject_id)&(df_hosp_icd_diagnoses.hadm_id==hadm_id)].sort_values(by=['seq_num'])
+                return_list = list(df_aux_filtered.icd_code)
+
+                return return_list, hadm_id #diags_hosp, hadm_id
 
         def get_diagnosis_ed(subject_id, ecg_time,also_hosp_diag=True):
             df_ecg_during_ed = df_ed_stays[(df_ed_stays.subject_id==subject_id) & (df_ed_stays.intime<ecg_time) & (df_ed_stays.outtime>ecg_time)]
@@ -101,18 +113,19 @@ def main():
 
         result=[]
 
+        print("Start processing...")
         for id,row in tqdm(df.iterrows(),total=len(df)):
             tmp={}
             tmp["file_name"]=row["file_name"]
             tmp["study_id"]=row["study_id"]
-            tmp["subject_id"]=row["subject_id"]
+            tmp["subject_id"]=row["patient_id"]
             tmp["ecg_time"]=row["ecg_time"]
-            hosp_diag_hosp, hosp_hadm_id =get_diagnosis_hosp(row["subject_id"], row["ecg_time"])
+            hosp_diag_hosp, hosp_hadm_id =get_diagnosis_hosp(row["patient_id"], row["ecg_time"])
             tmp["hosp_diag_hosp"] = hosp_diag_hosp
             tmp["hosp_hadm_id"] =hosp_hadm_id
-            ed_diag_ed,ed_diag_hosp,ed_stay_id,ed_hadm_id = get_diagnosis_ed(row["subject_id"], row["ecg_time"])
-            tmp["ed_diag_ed"]=ed_diag_ed
-            tmp["ed_diag_hosp"]=ed_diag_hosp
+            ed_diag_ed,ed_diag_hosp,ed_stay_id,ed_hadm_id = get_diagnosis_ed(row["patient_id"], row["ecg_time"])
+            # tmp["ed_diag_ed"]=ed_diag_ed
+            # tmp["ed_diag_hosp"]=ed_diag_hosp
             tmp["ed_stay_id"]=ed_stay_id
             tmp["ed_hadm_id"]=ed_hadm_id
             result.append(tmp)
@@ -122,21 +135,54 @@ def main():
         
     #################################################################################################
     print("Step 3: Map everything to ICD10 and enrich with more metadata to create output records_w_diag_icd10.pkl")
+    import ast
+    def our_icd_codes(x):
+            label_mapping = {"(1) Hypertensive diseases": ["I10", "I11", "I12", "I13"],
+                            "(2) Ischaemic heart diseases": ["I20", "I21", "I22", "I24"],
+                            "(3) Chronic ischaemic heart disease": ["I25"],
+                            "(4) Cardiomyopathies diseases": ["I42", "I43"],
+                            "(5) Dysrhythmias diseases": ["I44", "I45", "I47", "I48", "I49"],
+                            "(6) Heart failure": ["I50"]
+                            }
+            if isinstance(x, str):
+                x_list = ast.literal_eval(x)
+                return_type = "str"
+            elif isinstance(x, list):
+                x_list = x
+                return_type = "list"
+            else:
+                raise ValueError("Input must be a string or a list")
+            x_return = []
+            for label_new, value_list in label_mapping.items():
+                for label_old in x_list:
+                    if any([v in label_old for v in value_list]):
+                        x_return.append(label_new)
+            x_return = list(set(x_return))
+            if return_type == "list":
+                return x_return
+            elif return_type == "str":
+                return str(x_return)
+
     if((target_path/"records_w_diag_icd10.pkl").exists()):
         print("Skipping: using existing records_w_diag_icd10.pkl")
         df_full = pd.read_pickle(target_path/"records_w_diag_icd10.pkl")
     else:
         df_full["hosp_diag_hosp"]=df_full["hosp_diag_hosp"].apply(lambda x: [icd_mapping[y] for y in x])
         df_full["hosp_diag_hosp"]=df_full["hosp_diag_hosp"].apply(lambda x: list(set([y for y in x if (y!="NoDx" and y!=None)])))
-        df_full["ed_diag_hosp"]=df_full["ed_diag_hosp"].apply(lambda x: [icd_mapping[y] for y in x])
-        df_full["ed_diag_hosp"]=df_full["ed_diag_hosp"].apply(lambda x: list(set([y for y in x if (y!="NoDx" and y!=None)])))
-        df_full["ed_diag_ed"]=df_full["ed_diag_ed"].apply(lambda x: [icd_mapping[y] for y in x if y!="NoDx"])
-        df_full["ed_diag_ed"]=df_full["ed_diag_ed"].apply(lambda x: list(set([y for y in x if (y!="NoDx" and y!=None)])))
+
+        # Map to our icd10 mapping
+        df_full["hosp_diag_hosp"]=df_full["hosp_diag_hosp"].apply(lambda x: our_icd_codes(x))
+
+        # df_full["ed_diag_hosp"]=df_full["ed_diag_hosp"].apply(lambda x: [icd_mapping[y] for y in x])
+        # df_full["ed_diag_hosp"]=df_full["ed_diag_hosp"].apply(lambda x: list(set([y for y in x if (y!="NoDx" and y!=None)])))
+        # df_full["ed_diag_ed"]=df_full["ed_diag_ed"].apply(lambda x: [icd_mapping[y] for y in x if y!="NoDx"])
+        # df_full["ed_diag_ed"]=df_full["ed_diag_ed"].apply(lambda x: list(set([y for y in x if (y!="NoDx" and y!=None)])))
         #ed or hosp ecgs with discharge diagnosis
-        df_full["all_diag_hosp"]=df_full.apply(lambda row: list(set(row["hosp_diag_hosp"]+row["ed_diag_hosp"])),axis=1)
+        # df_full["all_diag_hosp"]=df_full.apply(lambda row: list(set(row["hosp_diag_hosp"]+row["ed_diag_hosp"])),axis=1)
+        df_full["all_diag_hosp"]=df_full.apply(lambda row: list(set(row["hosp_diag_hosp"])),axis=1)
         # 'all_diag_all': 'all_diag_hosp' if available otherwise 'ed_diag_ed'
-        df_full['all_diag_all'] = df_full.apply(lambda row: row['all_diag_hosp'] if row['all_diag_hosp'] else row['ed_diag_ed'],axis=1)
-        
+        # df_full['all_diag_all'] = df_full.apply(lambda row: row['all_diag_hosp'] if row['all_diag_hosp'] else row['ed_diag_ed'],axis=1)
+        df_full["all_diag_all"]=df_full.apply(lambda row: list(set(row["hosp_diag_hosp"])),axis=1)
 
         #add demographics
         df_hosp_patients = pd.read_csv(mimic_path/"hosp/patients.csv.gz")
@@ -156,10 +202,12 @@ def main():
         
         
         # Fols used in the manuscript experiments, use them for reproducibility.
-        df_full["fold"] = np.load('utils/folds.npy')
+        folds_aux = np.load('utils/folds.npy')
+        # df_full["fold"] = folds_aux
         
         # STRATIFIED FOLDS based on'all_diag'. folds not used in experiments, but provided for convenience
-        df_full, _ = prepare_mimic_ecg('mimic_all_all_allfirst_all_2000_5A',target_folder,df_mapped=None,df_diags=df_full)
+        print("Step 3.1: Create stratified folds")
+        df_full, _ = prepare_mimic_ecg('mimic_all_all_allfirst_all_2000_5A',target_path,df_mapped=None,df_diags=df_full)
         df_full['label_train'] = df_full['label_train'].apply(lambda x: x if x else ['outpatient'])
         df_full.rename(columns={'label_train':'label_strat_all2all'}, inplace=True)
         age_bins = pd.qcut(df_full['age'], q=4)
@@ -174,23 +222,25 @@ def main():
         col_label = 'merged_strat'
         col_group = 'subject_id'
         
+        print("Stratify foldes...")
         res = stratified_subsets(df_full,
                        col_label,
                        [0.05]*20,
                        col_group=col_group,
                        label_multi_hot=False,
                        random_seed=42)
+        print("Stratified folds created")
         
         df_full['strat_fold'] = res
-        df=df[["file_name",
+        columns_to_keep = ["file_name",
                "study_id",
                "subject_id",
                "ecg_time",
                "ed_stay_id",
                "ed_hadm_id",
                "hosp_hadm_id",
-               "ed_diag_ed",
-               "ed_diag_hosp",
+            #    "ed_diag_ed",
+            #    "ed_diag_hosp",
                "hosp_diag_hosp",
                "all_diag_hosp",
                "all_diag_all",
@@ -202,17 +252,18 @@ def main():
                "ecg_taken_in_ed",
                "ecg_taken_in_hosp",
                "ecg_taken_in_ed_or_hosp",
-               "fold",
-               "strat_fold"]]
+            #    "fold",
+               "strat_fold"]
+        df=df_full[columns_to_keep]
         df_full.to_csv(target_path/"records_w_diag_icd10.csv", index=False)
         
         
     if numpy_memmap:
         
     
-        print("Step 4: Convert signals into numpy in  target-path/processed")
+        print("Step 4: Convert signals into numpy in target-path/processed")
         (target_path/"processed").mkdir(parents=True, exist_ok=True)
-        df,_,_,_=prepare_mimicecg(zip_file_path, target_folder=target_path/"processed")
+        df,_,_,_=prepare_mimicecg(zip_file_path, target_folder=target_path/"processed", filter_file=args.filter_file)
 
         print("Step 5: Reformat as memmap for fast access")
         (target_path/"memmap").mkdir(parents=True, exist_ok=True)

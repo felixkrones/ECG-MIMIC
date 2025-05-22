@@ -106,21 +106,22 @@ def load_dataset(target_root,filename_postfix="",df_mapped=True):
     target_root = Path(target_root)
 
     if(df_mapped):
-        df = pickle.load(open(target_root/("df_memmap"+filename_postfix+".pkl"), "rb"))
+        print(f"Loading memmap/df_memmap{filename_postfix}.pkl")
+        df = pickle.load(open(target_root/("memmap/df_memmap"+filename_postfix+".pkl"), "rb"))
     else:
+        print(f"Loading memmap/df{filename_postfix}.pkl")
         df = pickle.load(open(target_root/("df"+filename_postfix+".pkl"), "rb"))
-
 
     if((target_root/("lbl_itos"+filename_postfix+".pkl")).exists()):#dict as pickle
         infile = open(target_root/("lbl_itos"+filename_postfix+".pkl"), "rb")
         lbl_itos=pickle.load(infile)
         infile.close()
     else:#array
-        lbl_itos = np.load(target_root/("lbl_itos"+filename_postfix+".npy"))
+        lbl_itos = np.load(target_root/("processed/lbl_itos"+filename_postfix+".npy"))
 
 
-    mean = np.load(target_root/("mean"+filename_postfix+".npy"))
-    std = np.load(target_root/("std"+filename_postfix+".npy"))
+    mean = np.load(target_root/("processed/mean"+filename_postfix+".npy"))
+    std = np.load(target_root/("processed/std"+filename_postfix+".npy"))
     return df, lbl_itos, mean, std
 
 
@@ -380,7 +381,7 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
         self.timeseries_df_data = np.array(df[col_data])
         if(self.timeseries_df_data.dtype not in [np.int16, np.int32, np.int64]):
             assert(memmap_filename is None and npy_data is None) #only for filenames in mode files
-            self.timeseries_df_data = np.array(df[col_data].astype(str)).astype(np.string_)
+            self.timeseries_df_data = np.array(df[col_data].astype(str)).astype(np.bytes_)
 
         if(col_lbl is None):# use dummy labels
             self.timeseries_df_label = np.zeros(len(df))
@@ -393,7 +394,7 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
             if(not(annotation and memmap_filename is not None)):#skip if memmap and annotation        
                 if(self.timeseries_df_label.dtype not in [np.int16, np.int32, np.int64, np.float32, np.float64]): #everything else cannot be batched anyway mp.Manager().list(self.timeseries_df_label)
                     assert(annotation and memmap_filename is None and npy_data is None)#only for filenames in mode files
-                    self.timeseries_df_label = np.array(df[col_lbl].apply(lambda x:str(x))).astype(np.string_)
+                    self.timeseries_df_label = np.array(df[col_lbl].apply(lambda x:str(x))).astype(np.bytes_)
 
         if(cols_static is not None):
             if(len(cols_static)==1):
@@ -416,7 +417,7 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
         self.fs_annotation_over_fs_data = fs_annotation_over_fs_data
 
         if(memmap_filename is not None):
-            self.memmap_meta_filename = memmap_filename.parent/(memmap_filename.stem+"_meta.npz")
+            self.memmap_meta_filename = memmap_filename.parent/"memmap"/(memmap_filename.stem+"_meta.npz")
             self.mode="memmap"
             memmap_meta = np.load(self.memmap_meta_filename, allow_pickle=True)
             self.memmap_start = memmap_meta["start"].astype(np.int64)# cast as integers to be on the safe side
@@ -424,7 +425,7 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
             self.memmap_length = memmap_meta["length"].astype(np.int64)
             self.memmap_file_idx = memmap_meta["file_idx"].astype(np.int64)
             self.memmap_dtype = np.dtype(str(memmap_meta["dtype"]))
-            self.memmap_filenames = np.array(memmap_meta["filenames"]).astype(np.string_)#save as byte to avoid issue with mp
+            self.memmap_filenames = np.array(memmap_meta["filenames"]).astype(np.bytes_)#save as byte to avoid issue with mp
             if(annotation):
                 #by default use the memmap_label.npy in the same directory as the signal memmap file
                 memmap_label_filename=memmap_label_filename if memmap_label_filename is not None else self.memmap_meta_filename.parent/("_".join(self.memmap_meta_filename.stem.split("_")[:-1])+"_label.npy")
@@ -435,7 +436,7 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
                 self.memmap_length_label = memmap_meta_label["length"].astype(np.int64)
                 self.memmap_file_idx_label = memmap_meta_label["file_idx"].astype(np.int64)
                 self.memmap_dtype_label = np.dtype(str(memmap_meta_label["dtype"]))
-                self.memmap_filenames_label = np.array(memmap_meta_label["filenames"]).astype(np.string_)
+                self.memmap_filenames_label = np.array(memmap_meta_label["filenames"]).astype(np.bytes_)
         elif(npy_data is not None):
             self.mode="npy"
             if(isinstance(npy_data,np.ndarray) or isinstance(npy_data,list)):

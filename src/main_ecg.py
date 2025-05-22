@@ -267,6 +267,7 @@ class Main_ECG(lp.LightningModule):
             test_datasets.append(TimeseriesDatasetCrops(df_test,self.hparams.input_size,data_folder=target_folder,chunk_length=chunk_length_valtest,min_chunk_length=self.hparams.input_size, stride=stride_valtest,transforms=tfms_ptb_xl_cpc,col_lbl ="label",memmap_filename=target_folder/("memmap.npy")))
             
             if(self.hparams.export_predictions_path!=""):# save lbl_itos and test dataframe for later
+                os.makedirs(Path(self.hparams.export_predictions_path),exist_ok=True)
                 np.save(Path(self.hparams.export_predictions_path)/"lbl_itos.npy",self.lbl_itos)
                 df_test.to_pickle(Path(self.hparams.export_predictions_path)/("df_test"+str(len(test_datasets)-1)+".pkl"))
 

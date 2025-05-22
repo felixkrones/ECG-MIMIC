@@ -38,48 +38,104 @@ def resample_data(sigbufs, channel_labels, fs, target_fs, channels=12, channel_s
         data = resampy.resample(sigbufs, fs, target_fs, axis=0).astype(np.float32)
     return data
 
-def prepare_mimicecg(data_path="", clip_amp=3, target_fs=100, channels=12, strat_folds=20, channel_stoi=channel_stoi_default, target_folder=None, recreate_data=True):
+def prepare_mimicecg(data_path="", clip_amp=3, target_fs=100, channels=12, strat_folds=20, channel_stoi=channel_stoi_default, target_folder=None, recreate_data=True, filter_file=None):
 
     def fix_nans_and_clip(signal,clip_amp=3):
         for i in range(signal.shape[1]):
             tmp = pd.DataFrame(signal[:,i]).interpolate().values.ravel().tolist()
             signal[:,i]= np.clip(tmp,a_max=clip_amp, a_min=-clip_amp) if clip_amp>0 else tmp
-    
+
+    if filter_file is not None:
+        df_filter = pd.read_parquet(filter_file)
+        subject_ids_to_keep = df_filter.subject_id.unique()
+        print(f"Found {len(subject_ids_to_keep)} patients in filter file")
+    else:
+        subject_ids_to_keep = None
+
     if(recreate_data):
         target_folder = Path(target_folder)
         target_folder.mkdir(parents=True, exist_ok=True)
 
-        with zipfile.ZipFile(Path(data_path)/"mimic-iv-ecg-diagnostic-electrocardiogram-matched-subset-1.0.zip", 'r') as archive:
-            lst = archive.namelist()
-            lst = [x for x in lst if x.endswith(".hea")]
+        # Check if zip file exists
+        if os.path.exists(Path(data_path)/"mimic-iv-ecg-diagnostic-electrocardiogram-matched-subset-1.0.zip"):
+            print("Extracting zip file...")
+            with zipfile.ZipFile(Path(data_path)/"mimic-iv-ecg-diagnostic-electrocardiogram-matched-subset-1.0.zip", 'r') as archive:
+                lst = archive.namelist()
+                lst = [x for x in lst if x.endswith(".hea")]
+                if subject_ids_to_keep is not None:
+                    lst_length_olds = len(lst)
+                    lst = [x for x in lst if any([str(y) in str(x) for y in subject_ids_to_keep])]
+                    print(f"Filtered from {lst_length_olds} to {len(lst)} files")
+
+                meta = []
+                for l in tqdm(lst):
+                    archive.extract(l, path="tmp_dir/")
+                    archive.extract(l[:-3]+"dat", path="tmp_dir/")
+                    filename = Path("tmp_dir")/l
+                    sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
+                
+                    tmp={}
+                    tmp["data"]=filename.parent.parent.stem+"_"+filename.parent.stem+".npy" #patientid_study.npy
+                    tmp["study_id"]=int(filename.stem)
+                    tmp["subject_id"]=int(filename.parent.parent.stem[1:])
+                    tmp['ecg_time']= datetime.datetime.combine(header["base_date"],header["base_time"])
+                    tmp["nans"]= list(np.sum(np.isnan(sigbufs),axis=0))#save nans channel-dependent
+                    if(np.sum(tmp["nans"])>0):#fix nans
+                        fix_nans_and_clip(sigbufs,clip_amp=clip_amp)
+                    elif(clip_amp>0):
+                        sigbufs = np.clip(sigbufs,a_max=clip_amp,a_min=-clip_amp)
+
+                    data = resample_data(sigbufs=sigbufs,channel_stoi=channel_stoi,channel_labels=header['sig_name'],fs=header['fs'],target_fs=target_fs,channels=channels)
+                    
+                    assert(target_fs<=header['fs'])
+                    np.save(target_folder/tmp["data"],data)
+                    meta.append(tmp)
+                    
+                    os.unlink("tmp_dir/"+l)
+                    os.unlink("tmp_dir/"+l[:-3]+"dat")
+                    shutil.rmtree("tmp_dir")
+        else:
+            print("Using local files...")
+            ecg_folder = Path(data_path)
+            lst = sorted(ecg_folder.rglob("*.hea"))  # search recursively for header files
+
+            if subject_ids_to_keep is not None:
+                lst_length_olds = len(lst)
+                lst = [x for x in lst if any([str(y) in str(x) for y in subject_ids_to_keep])]
+                print(f"Filtered from {lst_length_olds} to {len(lst)} files")
 
             meta = []
-            for l in tqdm(lst):
-                archive.extract(l, path="tmp_dir/")
-                archive.extract(l[:-3]+"dat", path="tmp_dir/")
-                filename = Path("tmp_dir")/l
-                sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
-            
-                tmp={}
-                tmp["data"]=filename.parent.parent.stem+"_"+filename.parent.stem+".npy" #patientid_study.npy
-                tmp["study_id"]=int(filename.stem)
-                tmp["subject_id"]=int(filename.parent.parent.stem[1:])
-                tmp['ecg_time']= datetime.datetime.combine(header["base_date"],header["base_time"])
-                tmp["nans"]= list(np.sum(np.isnan(sigbufs),axis=0))#save nans channel-dependent
-                if(np.sum(tmp["nans"])>0):#fix nans
-                    fix_nans_and_clip(sigbufs,clip_amp=clip_amp)
-                elif(clip_amp>0):
-                    sigbufs = np.clip(sigbufs,a_max=clip_amp,a_min=-clip_amp)
+            for hea_file in tqdm(lst):
+                dat_file = hea_file.with_suffix(".dat")
+                if not dat_file.exists():
+                    continue
 
-                data = resample_data(sigbufs=sigbufs,channel_stoi=channel_stoi,channel_labels=header['sig_name'],fs=header['fs'],target_fs=target_fs,channels=channels)
-                
-                assert(target_fs<=header['fs'])
-                np.save(target_folder/tmp["data"],data)
+                sigbufs, header = wfdb.rdsamp(str(hea_file)[:-4])
+
+                tmp = {}
+                tmp["data"] = hea_file.parent.parent.stem + "_" + hea_file.parent.stem + ".npy"  # patientid_study.npy
+                tmp["study_id"] = int(hea_file.stem)
+                tmp["subject_id"] = int(hea_file.parent.parent.stem[1:])
+                tmp['ecg_time'] = datetime.datetime.combine(header["base_date"], header["base_time"])
+                tmp["nans"] = list(np.sum(np.isnan(sigbufs), axis=0))
+
+                if np.sum(tmp["nans"]) > 0:
+                    fix_nans_and_clip(sigbufs, clip_amp=clip_amp)
+                elif clip_amp > 0:
+                    sigbufs = np.clip(sigbufs, a_max=clip_amp, a_min=-clip_amp)
+
+                data = resample_data(
+                    sigbufs=sigbufs,
+                    channel_stoi=channel_stoi,
+                    channel_labels=header['sig_name'],
+                    fs=header['fs'],
+                    target_fs=target_fs,
+                    channels=channels
+                )
+
+                assert target_fs <= header['fs']
+                np.save(target_folder / tmp["data"], data)
                 meta.append(tmp)
-                
-                os.unlink("tmp_dir/"+l)
-                os.unlink("tmp_dir/"+l[:-3]+"dat")
-                shutil.rmtree("tmp_dir")
 
         df = pd.DataFrame(meta)
 

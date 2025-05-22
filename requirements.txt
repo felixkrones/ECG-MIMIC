@@ -1,0 +1,15 @@
+einops
+icd-mappings
+lightning
+opt-einsum
+pandas
+pyarrow
+resampy
+scikit-image
+scikit-learn
+tensorboard
+torch
+torchvision
+torchaudio
+tqdm
+wfdb
